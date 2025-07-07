@@ -1,27 +1,33 @@
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <exception>
-#include <future>
-#include <print>
+#include <map>
+#include <memory>
 #include <string>
+#include <termios.h>
+#include <utility>
 
 #include <boost/asio.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/ssl.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
 
 #include "log/logger.hpp"
 
 using namespace std::chrono_literals;
 namespace asio = boost::asio;
+namespace ssl = boost::asio::ssl;
+namespace beast = boost::beast;
+
 using namespace boost::asio::experimental::awaitable_operators;
 
-std::atomic<bool> g_exit{ false };
-
-bool exitRequested() noexcept { return g_exit.load(std::memory_order::acquire); }
-
-void requestStop() noexcept { g_exit.store(true, std::memory_order_release); }
+using ClientsMap = std::map<std::string, ssl::stream<asio::ip::tcp::socket>>;
+using SharedClientsMap = std::shared_ptr<ClientsMap>;
 
 asio::awaitable<void> timeout(const std::chrono::milliseconds& timeout)
 {
@@ -30,93 +36,162 @@ asio::awaitable<void> timeout(const std::chrono::milliseconds& timeout)
     co_return co_await timer.async_wait(asio::use_awaitable);
 }
 
-asio::awaitable<void> waitUnitExitRequested()
+asio::awaitable<void> handle_connection(std::string tag, SharedClientsMap clients)
 {
-    static constexpr std::chrono::milliseconds delta{ 100ms };
-    auto exc{ co_await asio::this_coro::executor };
-    asio::steady_timer timer{ exc };
-    while (not exitRequested())
+    struct ClientDropper
     {
-        timer.expires_after(delta);
-        co_await timer.async_wait(asio::use_awaitable);
+        const std::string& m_tag;
+        ClientsMap& m_clients;
+
+        ~ClientDropper() { m_clients.erase(m_tag); }
+    } dropper{ .m_tag = tag, .m_clients = *clients };
+
+    auto& socket{ clients->at(tag) };
+    auto shake_res =
+        co_await(socket.async_handshake(ssl::stream_base::handshake_type::server, asio::use_awaitable) or timeout(10s));
+    if (shake_res.index() == 1)
+    {
+        LOG_INFO("handshake timed out for {}", tag);
+        co_await(socket.async_shutdown(asio::use_awaitable) or timeout(100ms));
+        co_return;
     }
-}
 
-asio::awaitable<void> handle_connection(asio::ip::tcp::socket socket)
-{
-    std::string tag{ socket.remote_endpoint().address().to_string() + ":" +
-                     std::to_string(socket.remote_endpoint().port()) };
-
-    std::array<char, 1024> data;
+    std::array<char, 1024> data{};
     while (true)
     {
-        auto res = co_await(socket.async_receive(asio::buffer(data), asio::use_awaitable) or timeout(10s));
+        data.fill(0);
+        auto res = co_await(socket.async_read_some(asio::buffer(data), asio::use_awaitable) or timeout(1min));
         if (res.index() == 1)
         {
             LOG_INFO("timed out for {}", tag);
-            co_return;
+            break;
         }
 
-        auto nBytes{ std::get<0>(res) };
+        size_t nBytes{ std::get<0>(res) };
         if (nBytes == 0)
         {
             LOG_INFO("connection to {} most likely closed", tag);
-            co_return;
+            break;
         }
 
-        std::string_view strData{ data.begin(), data.begin() + nBytes };
+        std::string strData{ data.begin(), nBytes };
         if (strData.ends_with('\n'))
         {
             strData = strData.substr(0, strData.size() - 1);
         }
-        LOG_INFO("client {}: n-bytes: {} says: {}", tag, nBytes, strData);
+
+        LOG_INFO("client {}: n-bytes: {} says: '{}'. sending it all other clients", tag, nBytes, strData);
+
+        for (auto& [clientTag, client] : *clients)
+        {
+            if (tag != clientTag)
+            {
+                asio::co_spawn(
+                    client.get_executor(),
+                    client.async_write_some(asio::buffer(data, nBytes), asio::use_awaitable) or timeout(1s),
+                    asio::detached
+                );
+            }
+        }
+    }
+
+    co_await(socket.async_shutdown(asio::use_awaitable) or timeout(100ms));
+}
+
+asio::awaitable<void> read_http(std::string host, std::string url, ssl::context& sslCtx)
+{
+    auto ctx{ co_await asio::this_coro::executor };
+    ssl::stream<beast::tcp_stream> stream{ ctx, sslCtx };
+    asio::ip::tcp::resolver resolver{ ctx };
+
+    // Set the expected hostname in the peer certificate for verification
+    stream.set_verify_callback(ssl::host_name_verification(host));
+
+    auto resolved{ co_await resolver.async_resolve(host, "https", asio::use_awaitable) };
+    auto ep{ *resolved.begin() };
+    LOG_INFO("resolved host:{} url:{} to '{}:{}'", host, url, ep.host_name(), ep.service_name());
+
+    if (auto res = co_await(beast::get_lowest_layer(stream).async_connect(ep, asio::use_awaitable) or timeout(10s));
+        res.index() == 1)
+    {
+        LOG_ERROR("async_connect to {} timed out", host);
+        co_return;
+    }
+
+    LOG_INFO("connect to {}", host);
+
+    if (auto res = co_await(stream.async_handshake(ssl::stream_base::client, asio::use_awaitable) or timeout(10s));
+        res.index() == 1)
+    {
+        LOG_ERROR("async_handshake to {} timed out", host);
+        co_return;
+    }
+
+    LOG_INFO("handshake completed to {}", host);
+
+    std::string fullUrl{ "https://" + host + '/' + url };
+    beast::http::request<beast::http::string_body> req{ beast::http::verb::get, fullUrl, 20 };
+    auto nBytesWritten = co_await beast::http::async_write(stream, req, asio::use_awaitable);
+    LOG_INFO("wrote {} bytes to {}", nBytesWritten, fullUrl);
+
+    beast::flat_buffer buff{};
+    beast::http::response<beast::http::string_body> res;
+    auto nBytesRead = co_await beast::http::async_read(stream, buff, res, asio::use_awaitable);
+
+    LOG_INFO("read {} bytes from {}", nBytesRead, fullUrl);
+
+    co_return;
+}
+
+asio::awaitable<void> accept_client(ssl::context& sslCctx)
+{
+    auto ctx{ co_await asio::this_coro::executor };
+    asio::ip::tcp::resolver resolver{ ctx };
+    auto resolve_res =
+        co_await resolver.async_resolve("localhost", "8080", asio::ip::resolver_base::v4_mapped, asio::use_awaitable);
+    asio::ip::tcp::acceptor acc{ ctx, resolve_res.begin()->endpoint() };
+    const auto ep{ acc.local_endpoint() };
+
+    SharedClientsMap clients{ std::make_shared<ClientsMap>() };
+
+    while (true)
+    {
+        LOG_INFO("accepting {}:{}", ep.address().to_string(), ep.port());
+
+        auto socket{ co_await acc.async_accept(asio::use_awaitable) };
+        std::string tag{ socket.remote_endpoint().address().to_string() + ":" +
+                         std::to_string(socket.remote_endpoint().port()) };
+
+        LOG_INFO("accepted {}:{} -> {}", ep.address().to_string(), ep.port(), tag);
+
+        ssl::stream<asio::ip::tcp::socket> stream{ std::move(socket), sslCctx };
+        clients->emplace(tag, std::move(stream));
+        asio::co_spawn(acc.get_executor(), handle_connection(tag, clients), asio::detached);
     }
 }
 
-asio::awaitable<void> handle_accept(asio::ip::tcp::acceptor& acc)
-{
-    const auto ep{ acc.local_endpoint() };
-    LOG_INFO("accepting {}:{}", ep.address().to_string(), ep.port());
-
-    auto socket{ co_await acc.async_accept(asio::use_awaitable) };
-    LOG_INFO(
-        "accepted {}:{} -> {}:{}",
-        ep.address().to_string(),
-        ep.port(),
-        socket.remote_endpoint().address().to_string(),
-        socket.remote_endpoint().port()
-    );
-    asio::co_spawn(acc.get_executor(), handle_connection(std::move(socket)), asio::detached);
-}
-
-asio::awaitable<void> async_main(asio::io_context& ctx, std::promise<int> res)
+asio::awaitable<void> async_main(asio::io_context& ctx, ssl::context& sslCtx)
 {
     try
     {
-        auto exc{ co_await asio::this_coro::executor };
+        auto cs{ co_await asio::this_coro::cancellation_state };
+        LOG_INFO("running async main");
+        asio::co_spawn(ctx, accept_client(sslCtx), asio::detached);
+        asio::co_spawn(ctx, read_http("dummyjson.com", "/test", sslCtx), asio::detached);
 
-        std::println("running async main");
-
-        asio::ip::tcp::endpoint ep{ asio::ip::make_address("127.0.0.1"), 8080 };
-        asio::ip::tcp::resolver resolver{ ctx };
-        auto resolve_res = co_await resolver.async_resolve(ep);
-        asio::ip::tcp::acceptor acc{ ctx, resolve_res.begin()->endpoint() };
-
-        while (not exitRequested())
+        while (not cs.cancelled())
         {
-            co_await(handle_accept(acc) || waitUnitExitRequested());
+            asio::steady_timer tm{ ctx, 100ms };
+            co_await tm.async_wait(asio::use_awaitable);
         }
-
-        res.set_value(0);
     }
     catch (const std::exception& e)
     {
-        LOG_ERROR("async main e {}", e.what());
-        res.set_exception(std::current_exception());
+        LOG_ERROR("async main e: {}", e.what());
     }
     catch (...)
     {
-        res.set_exception(std::current_exception());
+        LOG_ERROR("unexpected exception");
     }
     ctx.stop();
     co_return;
@@ -128,11 +203,15 @@ int main()
     {
         Sage::Logger::SetupLogger();
 
-        asio::io_context ctx;
-        // asio::cancellation_signal cs;
-
-        std::promise<int> main_promise;
-        auto future{ main_promise.get_future() };
+        asio::io_context ctx{ 1 };
+        ssl::context sslCtx{ ssl::context::tlsv13 };
+        sslCtx.use_certificate_file(
+            "/home/sagar/workspace/cpp-coro/certs/example.com.crt", ssl::context::file_format::pem
+        );
+        sslCtx.use_private_key_file(
+            "/home/sagar/workspace/cpp-coro/certs/example.com.key", ssl::context::file_format::pem
+        );
+        sslCtx.set_verify_mode(ssl::verify_peer);
 
         // hook signals
         asio::signal_set signals{ ctx };
@@ -141,21 +220,28 @@ int main()
             signals.add(sig);
         }
         signals.async_wait(
-            [](auto, auto sig)
+            [&](auto, auto sig)
             {
                 LOG_INFO("caught signal {}. stopping", strsignal(sig));
-                requestStop();
+                ctx.stop();
             }
         );
 
-        asio::co_spawn(ctx, async_main(ctx, std::move(main_promise)), asio::detached);
-        ctx.run();
-        int res{ future.get() };
-        return res;
+        asio::co_spawn(ctx, async_main(ctx, sslCtx), asio::detached);
+
+        while (not ctx.stopped())
+        {
+            size_t events{ ctx.run_for(100ms) };
+            if (events)
+            {
+                LOG_DEBUG("handled {} events", events);
+            }
+        }
+        return 0;
     }
     catch (const std::exception& e)
     {
-        LOG_CRITICAL("failed with {}", e.what());
+        LOG_ERROR("failed with {}", e.what());
         return 1;
     }
 }

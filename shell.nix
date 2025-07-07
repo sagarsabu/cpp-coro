@@ -4,10 +4,11 @@
 pkgs.mkShell {
   packages = with pkgs; [
     folly
-    boost
+    boost188
+    gcc14
   ];
   inputsFrom = with pkgs; [
     folly
-    boost
+    boost188
   ];
 }
