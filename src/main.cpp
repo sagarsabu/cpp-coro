@@ -7,23 +7,28 @@
 #include <exception>
 #include <map>
 #include <memory>
+#include <openssl/tls1.h>
+#include <sstream>
 #include <string>
-#include <termios.h>
 #include <utility>
 
-#include <boost/asio.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/redirect_error.hpp>
+#include <boost/asio/signal_set.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <boost/beast/version.hpp>
 
 #include "log/logger.hpp"
 
-using namespace std::chrono_literals;
 namespace asio = boost::asio;
 namespace ssl = boost::asio::ssl;
 namespace beast = boost::beast;
 
+using namespace std::chrono_literals;
 using namespace boost::asio::experimental::awaitable_operators;
 
 using ClientsMap = std::map<std::string, ssl::stream<asio::ip::tcp::socket>>;
@@ -98,58 +103,103 @@ asio::awaitable<void> handle_connection(std::string tag, SharedClientsMap client
     co_await(socket.async_shutdown(asio::use_awaitable) or timeout(100ms));
 }
 
-asio::awaitable<void> read_http(std::string host, std::string url, ssl::context& sslCtx)
+asio::awaitable<void> read_http_once(std::string host, std::string target, ssl::context& sslCtx)
 {
-    auto ctx{ co_await asio::this_coro::executor };
-    ssl::stream<beast::tcp_stream> stream{ ctx, sslCtx };
-    asio::ip::tcp::resolver resolver{ ctx };
-
-    // Set the expected hostname in the peer certificate for verification
-    stream.set_verify_callback(ssl::host_name_verification(host));
-
-    auto resolved{ co_await resolver.async_resolve(host, "https", asio::use_awaitable) };
-    auto ep{ *resolved.begin() };
-    LOG_INFO("resolved host:{} url:{} to '{}:{}'", host, url, ep.host_name(), ep.service_name());
-
-    if (auto res = co_await(beast::get_lowest_layer(stream).async_connect(ep, asio::use_awaitable) or timeout(10s));
-        res.index() == 1)
+    try
     {
-        LOG_ERROR("async_connect to {} timed out", host);
-        co_return;
+        auto ctx{ co_await asio::this_coro::executor };
+        ssl::stream<beast::tcp_stream> stream{ ctx, sslCtx };
+        asio::ip::tcp::resolver resolver{ ctx };
+
+        // required for SNI verification
+        if (not SSL_set_tlsext_host_name(stream.native_handle(), host.c_str()))
+        {
+            throw beast::system_error(static_cast<asio::error::ssl_errors>(::ERR_get_error()));
+        }
+
+        auto resolved{ co_await resolver.async_resolve(host, "https", asio::use_awaitable) };
+        auto ep{ *resolved.begin() };
+        LOG_INFO("resolved host:{} target:{} to '{}:{}'", host, target, ep.host_name(), ep.service_name());
+
+        if (auto res = co_await(beast::get_lowest_layer(stream).async_connect(ep, asio::use_awaitable) or timeout(10s));
+            res.index() == 1)
+        {
+            LOG_ERROR("async_connect to {} timed out", host);
+            co_return;
+        }
+
+        const auto& socket = stream.next_layer().socket();
+        LOG_INFO("connected to {}:{}", socket.remote_endpoint().address().to_string(), socket.remote_endpoint().port());
+
+        std::get<0>(co_await(stream.async_handshake(ssl::stream_base::client, asio::use_awaitable) or timeout(10s)));
+
+        LOG_INFO("handshake completed {}", host);
+
+        beast::http::request<beast::http::string_body> req{ beast::http::verb::get, target, 11 };
+        req.set(beast::http::field::version, "2.0");
+        req.set(beast::http::field::host, host);
+        req.set(beast::http::field::user_agent, BOOST_BEAST_VERSION_STRING);
+
+        auto nBytesWritten =
+            std::get<0>(co_await(beast::http::async_write(stream, req, asio::use_awaitable) or timeout(10s)));
+        LOG_INFO("wrote {} bytes to {}", nBytesWritten, host);
+
+        beast::flat_buffer buff{};
+        beast::http::response<beast::http::string_body> res;
+        auto nBytesRead =
+            std::get<0>(co_await(beast::http::async_read(stream, buff, res, asio::use_awaitable) or timeout(10s)));
+
+        auto status{ res.result() };
+        std::ostringstream oss;
+        oss << status;
+        std::string statusStr{ oss.str() };
+        if (status == beast::http::status::ok)
+        {
+            std::string body{ res.body() };
+            LOG_INFO("read {} bytes from {} status: {} res: {}", nBytesRead, host, statusStr, body);
+        }
+        else
+        {
+            LOG_ERROR("read failed with status: {}", statusStr);
+        }
+
+        boost::system::error_code ec;
+        co_await stream.async_shutdown(asio::redirect_error(asio::use_awaitable, ec));
+        if (ec.failed())
+        {
+            LOG_ERROR("read shutdown failed.e: {}", ec.what());
+        }
+        else
+        {
+            LOG_INFO("stream to {} closed", host);
+        }
     }
-
-    LOG_INFO("connect to {}", host);
-
-    if (auto res = co_await(stream.async_handshake(ssl::stream_base::client, asio::use_awaitable) or timeout(10s));
-        res.index() == 1)
+    catch (const std::exception& e)
     {
-        LOG_ERROR("async_handshake to {} timed out", host);
-        co_return;
+        LOG_ERROR("read failed {}", e.what());
     }
+}
 
-    LOG_INFO("handshake completed to {}", host);
+asio::awaitable<void> read_http(std::string host, std::string target, ssl::context& sslCtx)
+{
+    auto exc{ co_await asio::this_coro::executor };
+    asio::steady_timer timer{ exc };
 
-    std::string fullUrl{ "https://" + host + '/' + url };
-    beast::http::request<beast::http::string_body> req{ beast::http::verb::get, fullUrl, 20 };
-    auto nBytesWritten = co_await beast::http::async_write(stream, req, asio::use_awaitable);
-    LOG_INFO("wrote {} bytes to {}", nBytesWritten, fullUrl);
-
-    beast::flat_buffer buff{};
-    beast::http::response<beast::http::string_body> res;
-    auto nBytesRead = co_await beast::http::async_read(stream, buff, res, asio::use_awaitable);
-
-    LOG_INFO("read {} bytes from {}", nBytesRead, fullUrl);
-
-    co_return;
+    while (true)
+    {
+        co_await read_http_once(host, target, sslCtx);
+        timer.expires_after(3s);
+        co_await timer.async_wait(asio::use_awaitable);
+    }
 }
 
 asio::awaitable<void> accept_client(ssl::context& sslCctx)
 {
-    auto ctx{ co_await asio::this_coro::executor };
-    asio::ip::tcp::resolver resolver{ ctx };
+    auto exc{ co_await asio::this_coro::executor };
+    asio::ip::tcp::resolver resolver{ exc };
     auto resolve_res =
         co_await resolver.async_resolve("localhost", "8080", asio::ip::resolver_base::v4_mapped, asio::use_awaitable);
-    asio::ip::tcp::acceptor acc{ ctx, resolve_res.begin()->endpoint() };
+    asio::ip::tcp::acceptor acc{ exc, resolve_res.begin()->endpoint() };
     const auto ep{ acc.local_endpoint() };
 
     SharedClientsMap clients{ std::make_shared<ClientsMap>() };
@@ -176,12 +226,14 @@ asio::awaitable<void> async_main(asio::io_context& ctx, ssl::context& sslCtx)
     {
         auto cs{ co_await asio::this_coro::cancellation_state };
         LOG_INFO("running async main");
+
+        asio::steady_timer tm{ ctx };
         asio::co_spawn(ctx, accept_client(sslCtx), asio::detached);
-        asio::co_spawn(ctx, read_http("dummyjson.com", "/test", sslCtx), asio::detached);
+        asio::co_spawn(ctx, read_http("dummyjson.com", "/ip", sslCtx), asio::detached);
 
         while (not cs.cancelled())
         {
-            asio::steady_timer tm{ ctx, 100ms };
+            tm.expires_after(100ms);
             co_await tm.async_wait(asio::use_awaitable);
         }
     }
@@ -205,6 +257,7 @@ int main()
 
         asio::io_context ctx{ 1 };
         ssl::context sslCtx{ ssl::context::tlsv13 };
+        sslCtx.set_default_verify_paths();
         sslCtx.use_certificate_file(
             "/home/sagar/workspace/cpp-coro/certs/example.com.crt", ssl::context::file_format::pem
         );
