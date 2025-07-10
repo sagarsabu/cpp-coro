@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-file(GLOB_RECURSE SRCS src/**.cpp)
+file(GLOB_RECURSE SRCS src/*.cpp)
 
 add_executable(cpp-coro ${SRCS})
 
@@ -26,7 +26,12 @@ target_compile_options(
           -Wformat
           -Wimplicit-fallthrough
           -Wpedantic
-          -fcoroutines)
+          -fcoroutines
+          # false positives in coroutine frame allocations
+          -Wno-mismatched-new-delete
+          # something from boost is triggering this
+          -Wno-array-bounds
+          -Wno-stringop-overflow)
 
 cmake_policy(SET CMP0167 OLD)
 find_package(Boost 1.88 REQUIRED CONFIG COMPONENTS system)
@@ -36,4 +41,5 @@ find_library(LIB_RT NAMES rt REQUIRED)
 
 target_include_directories(cpp-coro PRIVATE src/)
 
-target_link_libraries(cpp-coro PRIVATE ${LIB_RT} Boost::boost OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(cpp-coro PRIVATE ${LIB_RT} Boost::boost OpenSSL::SSL
+                                       OpenSSL::Crypto)

@@ -5,7 +5,7 @@ pkgs.mkShell {
   packages = with pkgs; [
     folly
     boost188
-    gcc14
+    gcc15
   ];
   inputsFrom = with pkgs; [
     folly
