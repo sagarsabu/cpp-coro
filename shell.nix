@@ -2,11 +2,9 @@
   pkgs ? import <nixpkgs> { },
 }:
 pkgs.mkShell {
-  packages = with pkgs; [
+  nativeBuildInputs = with pkgs; [
+    openssl
     boost188
     gcc15
-  ];
-  inputsFrom = with pkgs; [
-    boost188
   ];
 }

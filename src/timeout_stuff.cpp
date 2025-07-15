@@ -6,8 +6,6 @@
 using namespace std::chrono_literals;
 using namespace asio::experimental::awaitable_operators;
 
-
-
 asio::awaitable<void> something_that_timesout()
 {
     auto exc{ co_await asio::this_coro::executor };
@@ -31,8 +29,9 @@ asio::awaitable<void> something_that_timesout()
 
             LogOnDrop _logOnDrop{ .m_id = idx };
             auto exc{ co_await asio::this_coro::executor };
+            auto cs_state{ co_await asio::this_coro::cancellation_state };
             asio::steady_timer timer{ exc };
-            while (true)
+            while (cs_state.cancelled() != asio::cancellation_type::none)
             {
                 LOG_INFO("cancellable task {} has not been cancelled", idx);
                 timer.expires_after(1s);
@@ -40,9 +39,12 @@ asio::awaitable<void> something_that_timesout()
             }
         };
 
-        asio::co_spawn(exc, timeoutWithExc(f, 4s), detached_log_info_exception);
+        asio::cancellation_signal cs;
+        asio::co_spawn(exc, f, asio::bind_cancellation_slot(cs.slot(), asio::detached));
 
         timer.expires_after(4s);
         co_await timer.async_wait();
+
+        cs.emit(asio::cancellation_type::terminal);
     }
 }

@@ -39,6 +39,7 @@ find_package(OpenSSL REQUIRED)
 
 find_library(LIB_RT NAMES rt REQUIRED)
 
+# target_compile_options(cpp-coro PRIVATE BOOST_ASIO_ENABLE_HANDLER_TRACKING=1)
 target_include_directories(cpp-coro PRIVATE src/)
 
 target_link_libraries(cpp-coro PRIVATE ${LIB_RT} Boost::boost OpenSSL::SSL
