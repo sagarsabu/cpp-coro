@@ -1,13 +1,17 @@
 #include "timeout_stuff.hpp"
+#include "async_aliases.hpp"
 #include "log/logger.hpp"
+#include "utils.hpp"
 
 using namespace std::chrono_literals;
+using namespace asio::experimental::awaitable_operators;
+
+
 
 asio::awaitable<void> something_that_timesout()
 {
     auto exc{ co_await asio::this_coro::executor };
     asio::steady_timer timer{ exc };
-    asio::cancellation_signal cs;
 
     while (true)
     {
@@ -18,34 +22,27 @@ asio::awaitable<void> something_that_timesout()
 
         auto f = [idx = idx] -> asio::awaitable<void>
         {
-            // by default awaitables only allow terminal cancellation
-            // we'll enable all types here:
-            co_await asio::this_coro::reset_cancellation_state(asio::enable_total_cancellation());
+            struct LogOnDrop
+            {
+                int m_id;
 
+                ~LogOnDrop() { LOG_INFO("cancellable task {} has been cancelled", m_id); }
+            };
+
+            LogOnDrop _logOnDrop{ .m_id = idx };
             auto exc{ co_await asio::this_coro::executor };
             asio::steady_timer timer{ exc };
             while (true)
             {
-                auto c_state{ co_await asio::this_coro::cancellation_state };
-                if (c_state.cancelled() != asio::cancellation_type::none)
-                {
-                    break;
-                }
-
                 LOG_INFO("cancellable task {} has not been cancelled", idx);
                 timer.expires_after(1s);
                 co_await timer.async_wait();
             }
-
-            LOG_INFO("cancellable task {} has been cancelled", idx);
         };
 
-        asio::co_spawn(exc, asio::bind_cancellation_slot(cs.slot(), f), asio::detached);
+        asio::co_spawn(exc, timeoutWithExc(f, 4s), detached_log_info_exception);
 
         timer.expires_after(4s);
         co_await timer.async_wait();
-
-        LOG_INFO("cancelling tasks");
-        cs.emit(asio::cancellation_type::total);
     }
 }
