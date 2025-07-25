@@ -7,7 +7,7 @@
 using namespace std::chrono_literals;
 using namespace boost::asio::experimental::awaitable_operators;
 
-asio::awaitable<void> read_http_once(std::string host, std::string target, ssl::context& sslCtx)
+asio::awaitable<void> read_http_once(const std::string& host, const std::string& target, ssl::context& sslCtx)
 {
     try
     {
@@ -92,7 +92,7 @@ asio::awaitable<void> read_http(std::string host, std::string target, ssl::conte
     while (true)
     {
         co_await read_http_once(host, target, sslCtx);
-        timer.expires_after(3s);
+        timer.expires_after(10s);
         co_await timer.async_wait();
     }
 }

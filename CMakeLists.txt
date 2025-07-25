@@ -14,6 +14,10 @@ file(GLOB_RECURSE SRCS src/*.cpp)
 
 add_executable(cpp-coro ${SRCS})
 
+cmake_policy(SET CMP0167 OLD)
+find_package(Boost 1.88 REQUIRED CONFIG COMPONENTS system)
+find_package(OpenSSL REQUIRED)
+
 target_compile_options(
   cpp-coro
   PRIVATE -Wall
@@ -33,14 +37,10 @@ target_compile_options(
           -Wno-array-bounds
           -Wno-stringop-overflow)
 
-cmake_policy(SET CMP0167 OLD)
-find_package(Boost 1.88 REQUIRED CONFIG COMPONENTS system)
-find_package(OpenSSL REQUIRED)
-
-find_library(LIB_RT NAMES rt REQUIRED)
-
-# target_compile_options(cpp-coro PRIVATE BOOST_ASIO_ENABLE_HANDLER_TRACKING=1)
 target_include_directories(cpp-coro PRIVATE src/)
-
-target_link_libraries(cpp-coro PRIVATE ${LIB_RT} Boost::boost OpenSSL::SSL
+target_compile_definitions(
+  cpp-coro PRIVATE # BOOST_ASIO_HAS_IO_URING_AS_DEFAULT=1
+                   # BOOST_ASIO_ENABLE_HANDLER_TRACKING=1
+)
+target_link_libraries(cpp-coro PRIVATE Boost::boost OpenSSL::SSL
                                        OpenSSL::Crypto)

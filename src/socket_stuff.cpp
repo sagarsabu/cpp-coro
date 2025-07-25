@@ -52,7 +52,7 @@ asio::awaitable<void> handle_connection(std::string tag, SharedClientsMap client
         std::string strData{ data.begin(), nBytes };
         if (strData.ends_with('\n'))
         {
-            strData = strData.substr(0, strData.size() - 1);
+            strData.resize(strData.size() - 1);
         }
 
         LOG_INFO("client {}: n-bytes: {} says: '{}'. sending it all other clients", tag, nBytes, strData);

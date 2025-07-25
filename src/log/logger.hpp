@@ -57,10 +57,10 @@ std::string_view CurrentThreadName() noexcept;
 
 inline bool ShouldLog(Level level) noexcept { return level >= GetLogStreamer().GetLogLevel(); }
 
-template<Level LOG_LEVEl, typename... Args>
-inline void LogToStream(const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
+template<typename... Args>
+inline void LogToStream(Level level, const std::source_location& loc, std::format_string<Args...> fmt, Args&&... args)
 {
-    if (not Internal::ShouldLog(LOG_LEVEl))
+    if (not Internal::ShouldLog(level))
         return;
 
     LogTimestamp ts{ GetCurrentTimeStamp() };
@@ -69,11 +69,11 @@ inline void LogToStream(const std::source_location& loc, std::format_string<Args
     std::println(
         stream,
         "{}[{}{}] [{}] [{}] [{}:{}] {}{}",
-        GetLevelFormatter(LOG_LEVEl),
+        GetLevelFormatter(level),
         ts.m_s,
         ts.m_ns,
         CurrentThreadName(),
-        GetLevelName(LOG_LEVEl),
+        GetLevelName(level),
         GetFilenameStem(loc.file_name()),
         loc.line(),
         std::format(fmt, std::forward_like<Args>(args)...),
@@ -82,6 +82,7 @@ inline void LogToStream(const std::source_location& loc, std::format_string<Args
     std::flush(stream);
 }
 
+// cppcheck-suppress unusedFunction
 constexpr void Noop() {}
 
 } // namespace Internal
@@ -94,23 +95,23 @@ constexpr void Noop() {}
 
 #define LOG_TRACE(fmt, ...)                                                                                            \
     if (Sage::Logger::Internal::ShouldLog(Sage::Logger::Trace)) [[unlikely]]                                           \
-    Sage::Logger::Internal::LogToStream<Sage::Logger::Trace>(std::source_location::current(), fmt, ##__VA_ARGS__)
+    Sage::Logger::Internal::LogToStream(Sage::Logger::Trace, std::source_location::current(), fmt, ##__VA_ARGS__)
 
 #define LOG_DEBUG(fmt, ...)                                                                                            \
     if (Sage::Logger::Internal::ShouldLog(Sage::Logger::Debug)) [[unlikely]]                                           \
-    Sage::Logger::Internal::LogToStream<Sage::Logger::Debug>(std::source_location::current(), fmt, ##__VA_ARGS__)
+    Sage::Logger::Internal::LogToStream(Sage::Logger::Debug, std::source_location::current(), fmt, ##__VA_ARGS__)
 
 #define LOG_INFO(fmt, ...)                                                                                             \
-    Sage::Logger::Internal::LogToStream<Sage::Logger::Info>(std::source_location::current(), fmt, ##__VA_ARGS__)
+    Sage::Logger::Internal::LogToStream(Sage::Logger::Info, std::source_location::current(), fmt, ##__VA_ARGS__)
 
 #define LOG_WARNING(fmt, ...)                                                                                          \
-    Sage::Logger::Internal::LogToStream<Sage::Logger::Warning>(std::source_location::current(), fmt, ##__VA_ARGS__)
+    Sage::Logger::Internal::LogToStream(Sage::Logger::Warning, std::source_location::current(), fmt, ##__VA_ARGS__)
 
 #define LOG_ERROR(fmt, ...)                                                                                            \
-    Sage::Logger::Internal::LogToStream<Sage::Logger::Error>(std::source_location::current(), fmt, ##__VA_ARGS__)
+    Sage::Logger::Internal::LogToStream(Sage::Logger::Error, std::source_location::current(), fmt, ##__VA_ARGS__)
 
 #define LOG_CRITICAL(fmt, ...)                                                                                         \
-    Sage::Logger::Internal::LogToStream<Sage::Logger::Critical>(std::source_location::current(), fmt, ##__VA_ARGS__)
+    Sage::Logger::Internal::LogToStream(Sage::Logger::Critical, std::source_location::current(), fmt, ##__VA_ARGS__)
 
 #define LOG_IF(check, logMacro)                                                                                        \
     if ((check)) [[unlikely]]                                                                                          \

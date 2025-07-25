@@ -2,49 +2,59 @@
 #include "async_aliases.hpp"
 #include "log/logger.hpp"
 #include "utils.hpp"
+#include <memory>
 
 using namespace std::chrono_literals;
 using namespace asio::experimental::awaitable_operators;
 
+asio::awaitable<void> something_nested(int idx)
+{
+    AtScopeExit dropGuard{ [idx] { LOG_INFO("nested cancellable task {} has been cancelled", idx); } };
+    co_await timeout(15s);
+}
+
 asio::awaitable<void> something_that_timesout()
 {
     auto exc{ co_await asio::this_coro::executor };
-    asio::steady_timer timer{ exc };
+    int idx{ 0 };
 
     while (true)
     {
         LOG_INFO("starting tasks");
-
-        static int idx{ 0 };
         idx++;
 
-        auto f = [idx = idx] -> asio::awaitable<void>
-        {
-            struct LogOnDrop
+        auto cs{ std::make_shared<asio::cancellation_signal>() };
+        asio::co_spawn(
+            exc,
+            [idx, cs] -> asio::awaitable<void>
             {
-                int m_id;
+                AtScopeExit dropGuard{ [idx] { LOG_INFO("cancellable task {} has been cancelled", idx); } };
 
-                ~LogOnDrop() { LOG_INFO("cancellable task {} has been cancelled", m_id); }
-            };
+                while (true)
+                {
+                    LOG_INFO("cancellable task {} has not been cancelled", idx);
+                    try
+                    {
+                        co_await timeoutWithExc(1s, [idx] -> asio::awaitable<void> { co_await something_nested(idx); });
+                    }
+                    catch (const boost::system::system_error&)
+                    {
+                    }
 
-            LogOnDrop _logOnDrop{ .m_id = idx };
-            auto exc{ co_await asio::this_coro::executor };
-            auto cs_state{ co_await asio::this_coro::cancellation_state };
-            asio::steady_timer timer{ exc };
-            while (cs_state.cancelled() != asio::cancellation_type::none)
-            {
-                LOG_INFO("cancellable task {} has not been cancelled", idx);
-                timer.expires_after(1s);
-                co_await timer.async_wait();
-            }
-        };
+                    try
+                    {
+                        co_await timeoutWithExc(1s, something_nested, idx);
+                    }
+                    catch (const boost::system::system_error&)
+                    {
+                    }
+                }
+            },
+            asio::bind_cancellation_slot(cs->slot(), detached_log_exception{ Sage::Logger::Level::Error })
+        );
 
-        asio::cancellation_signal cs;
-        asio::co_spawn(exc, f, asio::bind_cancellation_slot(cs.slot(), asio::detached));
+        co_await timeout(4s);
 
-        timer.expires_after(4s);
-        co_await timer.async_wait();
-
-        cs.emit(asio::cancellation_type::terminal);
+        cs->emit(asio::cancellation_type::terminal);
     }
 }

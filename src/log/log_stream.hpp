@@ -31,8 +31,6 @@ private:
     LogStreamer& operator=(const LogStreamer&) = delete;
     LogStreamer& operator=(LogStreamer&&) = delete;
 
-    void EnsureLogFileWriteable();
-
     void SetStreamToConsole();
 
     void SetStreamToFile(std::ofstream fileStream);

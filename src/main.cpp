@@ -3,6 +3,7 @@
 #include <source_location>
 
 #include "async_aliases.hpp"
+#include "channel_stuff.hpp"
 #include "http_stuff.hpp"
 #include "log/logger.hpp"
 #include "socket_stuff.hpp"
@@ -20,6 +21,7 @@ asio::awaitable<void> async_main(asio::io_context& ctx, ssl::context& sslCtx)
         asio::co_spawn(ctx, accept_client(sslCtx), asio::detached);
         asio::co_spawn(ctx, read_http("dummyjson.com", "/ip", sslCtx), asio::detached);
         asio::co_spawn(ctx, something_that_timesout(), asio::detached);
+        asio::co_spawn(ctx, start_channel_work(), asio::detached);
 
         while (true)
         {
@@ -81,6 +83,10 @@ int main()
             }
         }
         return 0;
+    }
+    catch (const boost::system::system_error& e)
+    {
+        LOG_ERROR("failed with {}", e.what());
     }
     catch (const std::exception& e)
     {
