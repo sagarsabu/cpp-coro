@@ -1,8 +1,7 @@
-#include <openssl/tls1.h>
-
 #include "http_stuff.hpp"
 #include "log/logger.hpp"
 #include "utils.hpp"
+#include <openssl/tls1.h>
 
 using namespace std::chrono_literals;
 using namespace boost::asio::experimental::awaitable_operators;
@@ -23,9 +22,10 @@ asio::awaitable<void> read_http_once(const std::string& host, const std::string&
 
         auto resolved{ co_await resolver.async_resolve(host, "https") };
         auto ep{ *resolved.begin() };
-        LOG_INFO("resolved host:{} target:{} to '{}:{}'", host, target, ep.host_name(), ep.service_name());
+        LOG_DEBUG("resolved host:{} target:{} to '{}:{}'", host, target, ep.host_name(), ep.service_name());
 
-        if (auto res = co_await(beast::get_lowest_layer(stream).async_connect(ep, asio::use_awaitable) or timeout(10s));
+        if (auto res =
+                co_await (beast::get_lowest_layer(stream).async_connect(ep, asio::use_awaitable) or timeout(10s));
             res.index() == 1)
         {
             LOG_ERROR("async_connect to {} timed out", host);
@@ -33,11 +33,13 @@ asio::awaitable<void> read_http_once(const std::string& host, const std::string&
         }
 
         const auto& socket = stream.next_layer().socket();
-        LOG_INFO("connected to {}:{}", socket.remote_endpoint().address().to_string(), socket.remote_endpoint().port());
+        LOG_DEBUG(
+            "connected to {}:{}", socket.remote_endpoint().address().to_string(), socket.remote_endpoint().port()
+        );
 
-        std::get<0>(co_await(stream.async_handshake(ssl::stream_base::client, asio::use_awaitable) or timeout(10s)));
+        std::get<0>(co_await (stream.async_handshake(ssl::stream_base::client, asio::use_awaitable) or timeout(10s)));
 
-        LOG_INFO("handshake completed {}", host);
+        LOG_DEBUG("handshake completed {}", host);
 
         beast::http::request<beast::http::string_body> req{ beast::http::verb::get, target, 11 };
         req.set(beast::http::field::version, "2.0");
@@ -45,13 +47,13 @@ asio::awaitable<void> read_http_once(const std::string& host, const std::string&
         req.set(beast::http::field::user_agent, BOOST_BEAST_VERSION_STRING);
 
         auto nBytesWritten =
-            std::get<0>(co_await(beast::http::async_write(stream, req, asio::use_awaitable) or timeout(10s)));
+            std::get<0>(co_await (beast::http::async_write(stream, req, asio::use_awaitable) or timeout(10s)));
         LOG_INFO("wrote {} bytes to {}", nBytesWritten, host);
 
         beast::flat_buffer buff{};
         beast::http::response<beast::http::string_body> res;
         auto nBytesRead =
-            std::get<0>(co_await(beast::http::async_read(stream, buff, res, asio::use_awaitable) or timeout(10s)));
+            std::get<0>(co_await (beast::http::async_read(stream, buff, res, asio::use_awaitable) or timeout(10s)));
 
         auto status{ res.result() };
         std::ostringstream oss;
@@ -71,7 +73,7 @@ asio::awaitable<void> read_http_once(const std::string& host, const std::string&
         co_await stream.async_shutdown(asio::redirect_error(ec));
         if (ec.failed())
         {
-            LOG_ERROR("read shutdown failed.e: {}", ec.what());
+            LOG_WARNING("read shutdown failed.e: {}", ec.what());
         }
         else
         {

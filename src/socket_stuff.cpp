@@ -1,9 +1,8 @@
+#include "socket_stuff.hpp"
+#include "log/logger.hpp"
+#include "utils.hpp"
 #include <map>
 #include <memory>
-
-#include "log/logger.hpp"
-#include "socket_stuff.hpp"
-#include "utils.hpp"
 
 using namespace std::chrono_literals;
 using namespace boost::asio::experimental::awaitable_operators;
@@ -22,12 +21,13 @@ asio::awaitable<void> handle_connection(std::string tag, SharedClientsMap client
     } dropper{ .m_tag = tag, .m_clients = *clients };
 
     auto& socket{ clients->at(tag) };
-    auto shake_res =
-        co_await(socket.async_handshake(ssl::stream_base::handshake_type::server, asio::use_awaitable) or timeout(10s));
+    auto shake_res = co_await (
+        socket.async_handshake(ssl::stream_base::handshake_type::server, asio::use_awaitable) or timeout(10s)
+    );
     if (shake_res.index() == 1)
     {
         LOG_INFO("handshake timed out for {}", tag);
-        co_await(socket.async_shutdown(asio::use_awaitable) or timeout(100ms));
+        co_await (socket.async_shutdown(asio::use_awaitable) or timeout(100ms));
         co_return;
     }
 
@@ -35,7 +35,7 @@ asio::awaitable<void> handle_connection(std::string tag, SharedClientsMap client
     while (true)
     {
         data.fill(0);
-        auto res = co_await(socket.async_read_some(asio::buffer(data), asio::use_awaitable) or timeout(1min));
+        auto res = co_await (socket.async_read_some(asio::buffer(data), asio::use_awaitable) or timeout(1min));
         if (res.index() == 1)
         {
             LOG_INFO("timed out for {}", tag);
@@ -70,7 +70,7 @@ asio::awaitable<void> handle_connection(std::string tag, SharedClientsMap client
         }
     }
 
-    co_await(socket.async_shutdown(asio::use_awaitable) or timeout(100ms));
+    co_await (socket.async_shutdown(asio::use_awaitable) or timeout(100ms));
 }
 
 asio::awaitable<void> accept_client(ssl::context& sslCctx)

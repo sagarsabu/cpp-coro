@@ -1,18 +1,29 @@
-#include <csignal>
-#include <filesystem>
-#include <source_location>
-
 #include "async_aliases.hpp"
 #include "channel_stuff.hpp"
 #include "http_stuff.hpp"
 #include "log/logger.hpp"
 #include "socket_stuff.hpp"
 #include "timeout_stuff.hpp"
+#include <csignal>
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <filesystem>
+#include <format>
+#include <latch>
+#include <pthread.h>
+#include <source_location>
+#include <stop_token>
+#include <string>
+#include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 
-asio::awaitable<void> async_main(asio::io_context& ctx, ssl::context& sslCtx)
+asio::awaitable<void> async_main(ssl::context& sslCtx)
 {
+    auto ctx{ co_await asio::this_coro::executor };
     try
     {
         LOG_INFO("running async main");
@@ -37,7 +48,7 @@ asio::awaitable<void> async_main(asio::io_context& ctx, ssl::context& sslCtx)
     {
         LOG_ERROR("unexpected exception");
     }
-    ctx.stop();
+
     co_return;
 }
 
@@ -51,7 +62,11 @@ int main()
     {
         Sage::Logger::SetupLogger();
 
-        asio::io_context ctx{ 1 };
+        size_t nWorkers{ std::thread::hardware_concurrency() };
+        std::latch startLatch{ static_cast<ptrdiff_t>(nWorkers) + 1 };
+
+        asio::io_context ctx{ static_cast<int>(nWorkers) };
+
         ssl::context sslCtx{ ssl::context::tlsv13 };
         sslCtx.set_default_verify_paths();
         sslCtx.use_certificate_file(certsDir / "example.com.crt", ssl::context::file_format::pem);
@@ -72,8 +87,48 @@ int main()
             }
         );
 
-        asio::co_spawn(ctx, async_main(ctx, sslCtx), asio::detached);
+        asio::co_spawn(ctx, async_main(sslCtx), asio::detached);
 
+        sigset_t signalsToBlock{};
+        sigfillset(&signalsToBlock);
+
+        std::vector<std::jthread> workers(nWorkers);
+        for (size_t idx{ 1 }; auto& worker : workers)
+        {
+            worker = std::jthread(
+                [&startLatch, &ctx]([[maybe_unused]] std::stop_token token)
+                {
+                    startLatch.arrive_and_wait();
+                    auto guard{ asio::make_work_guard(ctx) };
+
+                    try
+                    {
+                        LOG_INFO("starting");
+                        ctx.run();
+                        LOG_INFO("stopping");
+                    }
+                    catch (const std::exception& e)
+                    {
+                        LOG_CRITICAL("exception raise. e='{}'", e.what());
+                        ctx.stop();
+                    }
+                }
+            );
+
+            auto handle{ worker.native_handle() };
+            std::string name{ std::string{ "worker" } + '-' + std::to_string(idx) };
+            pthread_setname_np(handle, name.c_str());
+
+            if (int err{ pthread_sigmask(SIG_BLOCK, &signalsToBlock, nullptr) }; err != 0)
+            {
+                LOG_CRITICAL("failed to block signals. {}", strerror(err));
+                std::exit(1);
+            };
+
+            idx++;
+        }
+
+        startLatch.arrive_and_wait();
         while (not ctx.stopped())
         {
             size_t events{ ctx.run_for(100ms) };
@@ -82,6 +137,16 @@ int main()
                 LOG_DEBUG("handled {} events", events);
             }
         }
+
+        for (auto& worker : workers)
+        {
+            if (worker.joinable())
+            {
+                worker.request_stop();
+                worker.join();
+            }
+        }
+
         return 0;
     }
     catch (const boost::system::system_error& e)

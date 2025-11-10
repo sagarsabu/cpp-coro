@@ -1,13 +1,12 @@
 #pragma once
 
+#include "log/log_levels.hpp"
 #include <boost/asio.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/beast.hpp>
 #include <exception>
 #include <source_location>
-
-#include "log/log_levels.hpp"
 
 namespace asio = boost::asio;
 namespace ssl = boost::asio::ssl;

@@ -15,12 +15,13 @@ file(GLOB_RECURSE SRCS src/*.cpp)
 add_executable(cpp-coro ${SRCS})
 
 cmake_policy(SET CMP0167 OLD)
-find_package(Boost 1.88 REQUIRED CONFIG COMPONENTS system)
 find_package(OpenSSL REQUIRED)
+find_package(Boost 1.88 REQUIRED CONFIG COMPONENTS system)
 
 target_compile_options(
   cpp-coro
-  PRIVATE -Wall
+  PRIVATE -march=native
+          -Wall
           -Wextra
           -Werror
           -Wattributes
@@ -44,3 +45,10 @@ target_compile_definitions(
 )
 target_link_libraries(cpp-coro PRIVATE Boost::boost OpenSSL::SSL
                                        OpenSSL::Crypto)
+
+if(DEFINED ENV{TSAN})
+  message(WARNING "enabling tsan")
+  target_compile_options(cpp-coro PRIVATE -fsanitize=thread
+                                          -fno-omit-frame-pointer -Wno-tsan)
+  target_link_options(cpp-coro PRIVATE -fsanitize=thread -static-libtsan)
+endif()
